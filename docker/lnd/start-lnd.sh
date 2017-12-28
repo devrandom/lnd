@@ -47,6 +47,7 @@ CHAIN=$(set_default "$CHAIN" "bitcoin")
 
 lnd \
     --noencryptwallet \
+    --no-macaroons \
     --logdir="/data" \
     "--$CHAIN.rpccert"="/rpc/rpc.cert" \
     "--$CHAIN.active" \
@@ -54,5 +55,6 @@ lnd \
     "--$CHAIN.rpchost"="blockchain" \
     "--$CHAIN.rpcuser"="$RPCUSER" \
     "--$CHAIN.rpcpass"="$RPCPASS" \
+    "--rpcport=10009" \
     --debuglevel="$DEBUG" \
     "$@"
