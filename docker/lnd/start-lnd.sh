@@ -44,6 +44,7 @@ RPCPASS=$(set_default "$RPCPASS" "devpass")
 DEBUG=$(set_default "$DEBUG" "debug")
 NETWORK=$(set_default "$NETWORK" "simnet")
 CHAIN=$(set_default "$CHAIN" "bitcoin")
+LND_RPC_CERT=$(set_default "$RPC_CERT" "$HOME/.lnd/tls.cert")
 
 lnd \
     --noencryptwallet \
@@ -57,4 +58,20 @@ lnd \
     "--$CHAIN.rpcpass"="$RPCPASS" \
     "--rpcport=10009" \
     --debuglevel="$DEBUG" \
-    "$@"
+    "$@" &
+
+echo "Waiting for cert to be generated..."
+
+count=10
+while [ $count -gt 0 ]; do
+  if [ -f "$LND_RPC_CERT" ]; then
+    echo "Found cert"
+    cp "$LND_RPC_CERT" /rpc/lnd.cert
+    break
+  else
+    echo "Still waiting for cert to be generated..."
+    sleep 1
+  fi
+done
+
+wait %1
