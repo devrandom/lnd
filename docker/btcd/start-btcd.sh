@@ -54,7 +54,7 @@ PARAMS=$(echo \
     "--rpccert=/rpc/rpc.cert" \
     "--rpckey=/rpc/rpc.key" \
     "--rpclisten=0.0.0.0" \
-    "--connect=$CONNECT"
+    "--connect=$BTCD_CONNECT"
 )
 
 # Set the mining flag only if address is non empty.

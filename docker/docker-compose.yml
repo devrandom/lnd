@@ -22,7 +22,7 @@ services:
         environment:
           - DEBUG
           - MINING_ADDRESS
-          - CONNECT
+          - BTCD_CONNECT
         entrypoint: ["./start-btcd.sh"]
 
     btcctl:
