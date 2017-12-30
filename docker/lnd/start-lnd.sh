@@ -66,7 +66,7 @@ count=10
 while [ $count -gt 0 ]; do
   if [ -f "$LND_RPC_CERT" ]; then
     echo "Found cert"
-    cp "$LND_RPC_CERT" /rpc/lnd.cert
+    cp "$LND_RPC_CERT" /rpc/lnd-$(hostname).cert
     break
   else
     echo "Still waiting for cert to be generated..."
