@@ -53,8 +53,7 @@ PARAMS=$(echo \
     "--logdir=/data" \
     "--rpccert=/rpc/rpc.cert" \
     "--rpckey=/rpc/rpc.key" \
-    "--rpclisten=0.0.0.0" \
-    "--connect=$BTCD_CONNECT"
+    "--rpclisten=0.0.0.0"
 )
 
 MINING_ADDRESS_FILE=/rpc/mining_address
@@ -66,6 +65,10 @@ fi
 # Set the mining flag only if address is non empty.
 if [[ -n "$MINING_ADDRESS" ]]; then
     PARAMS="$PARAMS --miningaddr=$MINING_ADDRESS"
+fi
+
+if [[ -n "BTCD_CONNECT" ]]; then
+    PARAMS="$PARAMS --connect=$BTCD_CONNECT"
 fi
 
 # Add user parameters to command.
