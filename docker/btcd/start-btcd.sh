@@ -57,6 +57,12 @@ PARAMS=$(echo \
     "--connect=$BTCD_CONNECT"
 )
 
+MINING_ADDRESS_FILE=/rpc/mining_address
+if [ -z "$MINING_ADDRESS" -a -f $MINING_ADDRESS_FILE ]; then
+    MINING_ADDRESS=$(cat $MINING_ADDRESS_FILE)
+    echo "Using mining address $MINING_ADDRESS from $MINING_ADDRESS_FILE"
+fi
+
 # Set the mining flag only if address is non empty.
 if [[ -n "$MINING_ADDRESS" ]]; then
     PARAMS="$PARAMS --miningaddr=$MINING_ADDRESS"
