@@ -67,7 +67,7 @@ if [[ -n "$MINING_ADDRESS" ]]; then
     PARAMS="$PARAMS --miningaddr=$MINING_ADDRESS"
 fi
 
-if [[ -n "BTCD_CONNECT" ]]; then
+if [[ -n "$BTCD_CONNECT" ]]; then
     PARAMS="$PARAMS --connect=$BTCD_CONNECT"
 fi
 
