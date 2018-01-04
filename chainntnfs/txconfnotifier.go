@@ -108,12 +108,15 @@ func (tcn *TxConfNotifier) Register(ntfn *ConfNtfn, txConf *TxConfirmation) erro
 	}
 
 	if txConf == nil || txConf.BlockHeight > tcn.currentHeight {
+                Log.Infof("Unconfirmed %v", ntfn.TxID)
 		// Transaction is unconfirmed.
 		tcn.confNotifications[*ntfn.TxID] =
 			append(tcn.confNotifications[*ntfn.TxID], ntfn)
 		return nil
 	}
 
+        Log.Infof("Register %v conf notification for %v",
+			ntfn.NumConfirmations, ntfn.TxID)
 	// If the transaction already has the required confirmations, dispatch
 	// notification immediately, otherwise record along with the height at
 	// which to notify.
@@ -128,6 +131,7 @@ func (tcn *TxConfNotifier) Register(ntfn *ConfNtfn, txConf *TxConfirmation) erro
 			ntfn.dispatched = true
 		}
 	} else {
+		Log.Infof("Will be confirmed at %v for %v", confHeight, ntfn.TxID)
 		ntfn.details = txConf
 		ntfnSet, exists := tcn.ntfnsByConfirmHeight[confHeight]
 		if !exists {
@@ -186,6 +190,7 @@ func (tcn *TxConfNotifier) ConnectTip(blockHash *chainhash.Hash,
 			}
 
 			confHeight := blockHeight + ntfn.NumConfirmations - 1
+                        Log.Infof("Confirmed %v, waiting for height %v", ntfn.TxID, confHeight)
 			ntfnSet, exists := tcn.ntfnsByConfirmHeight[confHeight]
 			if !exists {
 				ntfnSet = make(map[*ConfNtfn]struct{})
