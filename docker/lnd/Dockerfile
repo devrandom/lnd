@@ -13,13 +13,10 @@ ENV GODEBUG netdns=cgo
 RUN go get -u github.com/Masterminds/glide
 
 # Grab and install the latest version of lnd and all related dependencies.
-RUN git clone https://github.com/devrandom/lnd $GOPATH/src/github.com/lightningnetwork/lnd
+COPY . $GOPATH/src/github.com/lightningnetwork/lnd
 
 # Make lnd folder default.
 WORKDIR $GOPATH/src/github.com/lightningnetwork/lnd
-
-# devrandom
-RUN git checkout networking
 
 # Instll dependency and install/build lnd.
 RUN glide install
