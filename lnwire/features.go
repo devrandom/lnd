@@ -16,24 +16,56 @@ import (
 type FeatureBit uint16
 
 const (
+	// DataLossProtectRequired is a feature bit that indicates that a peer
+	// *requires* the other party know about the data-loss-protect optional
+	// feature. If the remote peer does not know of such a feature, then
+	// the sending peer SHOLUD disconnect them. The data-loss-protect
+	// feature allows a peer that's lost partial data to recover their
+	// settled funds of the latest commitment state.
+	DataLossProtectRequired FeatureBit = 0
+
+	// DataLossProtectOptional is an optional feature bit that indicates
+	// that the sending peer knows of this new feature and can activate it
+	// it. The data-loss-protect feature allows a peer that's lost partial
+	// data to recover their settled funds of the latest commitment state.
+	DataLossProtectOptional FeatureBit = 1
+
 	// InitialRoutingSync is a local feature bit meaning that the receiving
 	// node should send a complete dump of routing information when a new
 	// connection is established.
 	InitialRoutingSync FeatureBit = 3
 
+	// GossipQueriesRequired is a feature bit that indicates that the
+	// receiving peer MUST know of the set of features that allows nodes to
+	// more efficiently query the network view of peers on the network for
+	// reconciliation purposes.
+	GossipQueriesRequired FeatureBit = 6
+
+	// GossipQueriesOptional is an optional feature bit that signals that
+	// the setting peer knows of the set of features that allows more
+	// efficient network view reconciliation.
+	GossipQueriesOptional FeatureBit = 7
+
+	// TLVOnionPayloadRequired is a feature bit that indicates a node is
+	// able to decode the new TLV information included in the onion packet.
+	TLVOnionPayloadRequired FeatureBit = 8
+
+	// TLVOnionPayloadRequired is an optional feature bit that indicates a
+	// node is able to decode the new TLV information included in the onion
+	// packet.
+	TLVOnionPayloadOptional FeatureBit = 9
+
 	// maxAllowedSize is a maximum allowed size of feature vector.
 	//
 	// NOTE: Within the protocol, the maximum allowed message size is 65535
-	// bytes. Adding the overhead from the crypto protocol (the 2-byte
-	// packet length and 16-byte MAC), we arrive at 65569 bytes. Accounting
-	// for the overhead within the feature message to signal the type of
-	// the message, that leaves 65567 bytes for the init message itself.
-	// Next, we reserve 4-bytes to encode the lengths of both the local and
-	// global feature vectors, so 65563 for the global and local features.
-	// Knocking off one byte for the sake of the calculation, that leads to
-	// a max allowed size of 32781 bytes for each feature vector, or 131124
-	// different features.
-	maxAllowedSize = 32781
+	// bytes for all messages. Accounting for the overhead within the feature
+	// message to signal the type of message, that leaves us with 65533 bytes
+	// for the init message itself.  Next, we reserve 4 bytes to encode the
+	// lengths of both the local and global feature vectors, so 65529 bytes
+	// for the local and global features.  Knocking off one byte for the sake
+	// of the calculation, that leads us to 32764 bytes for each feature
+	// vector, or 131056 different features.
+	maxAllowedSize = 32764
 )
 
 // LocalFeatures is a mapping of known connection-local feature bits to a
@@ -42,14 +74,21 @@ const (
 // not advertised to the entire network. A full description of these feature
 // bits is provided in the BOLT-09 specification.
 var LocalFeatures = map[FeatureBit]string{
-	InitialRoutingSync: "initial-routing-sync",
+	DataLossProtectRequired: "data-loss-protect",
+	DataLossProtectOptional: "data-loss-protect",
+	InitialRoutingSync:      "initial-routing-sync",
+	GossipQueriesRequired:   "gossip-queries",
+	GossipQueriesOptional:   "gossip-queries",
 }
 
 // GlobalFeatures is a mapping of known global feature bits to a descriptive
 // name. All known global feature bits must be assigned a name in this mapping.
 // Global features are those which are advertised to the entire network. A full
 // description of these feature bits is provided in the BOLT-09 specification.
-var GlobalFeatures map[FeatureBit]string
+var GlobalFeatures = map[FeatureBit]string{
+	TLVOnionPayloadRequired: "tlv-onion",
+	TLVOnionPayloadOptional: "tlv-onion",
+}
 
 // RawFeatureVector represents a set of feature bits as defined in BOLT-09.  A
 // RawFeatureVector itself just stores a set of bit flags but can be used to
@@ -88,6 +127,20 @@ func (fv *RawFeatureVector) Unset(feature FeatureBit) {
 // SerializeSize returns the number of bytes needed to represent feature vector
 // in byte format.
 func (fv *RawFeatureVector) SerializeSize() int {
+	// We calculate byte-length via the largest bit index.
+	return fv.serializeSize(8)
+}
+
+// SerializeSize32 returns the number of bytes needed to represent feature
+// vector in base32 format.
+func (fv *RawFeatureVector) SerializeSize32() int {
+	// We calculate base32-length via the largest bit index.
+	return fv.serializeSize(5)
+}
+
+// serializeSize returns the number of bytes required to encode the feature
+// vector using at most width bits per encoded byte.
+func (fv *RawFeatureVector) serializeSize(width int) int {
 	// Find the largest feature bit index
 	max := -1
 	for feature := range fv.features {
@@ -100,8 +153,7 @@ func (fv *RawFeatureVector) SerializeSize() int {
 		return 0
 	}
 
-	// We calculate byte-length via the largest bit index
-	return max/8 + 1
+	return max/width + 1
 }
 
 // Encode writes the feature vector in byte representation. Every feature
@@ -117,12 +169,25 @@ func (fv *RawFeatureVector) Encode(w io.Writer) error {
 		return err
 	}
 
+	return fv.encode(w, length, 8)
+}
+
+// EncodeBase32 writes the feature vector in base32 representation. Every feature
+// encoded as a bit, and the bit vector is serialized using the least number of
+// bytes.
+func (fv *RawFeatureVector) EncodeBase32(w io.Writer) error {
+	length := fv.SerializeSize32()
+	return fv.encode(w, length, 5)
+}
+
+// encode writes the feature vector
+func (fv *RawFeatureVector) encode(w io.Writer, length, width int) error {
 	// Generate the data and write it.
 	data := make([]byte, length)
 	for feature := range fv.features {
-		byteIndex := int(feature / 8)
-		bitIndex := feature % 8
-		data[length-byteIndex-1] |= 1 << bitIndex
+		byteIndex := int(feature) / width
+		bitIndex := int(feature) % width
+		data[length-byteIndex-1] |= 1 << uint(bitIndex)
 	}
 
 	_, err := w.Write(data)
@@ -141,6 +206,19 @@ func (fv *RawFeatureVector) Decode(r io.Reader) error {
 	}
 	length := binary.BigEndian.Uint16(l[:])
 
+	return fv.decode(r, int(length), 8)
+}
+
+// DecodeBase32 reads the feature vector from its base32 representation. Every
+// feature encoded as a bit, and the bit vector is serialized using the least
+// number of bytes.
+func (fv *RawFeatureVector) DecodeBase32(r io.Reader, length int) error {
+	return fv.decode(r, length, 5)
+}
+
+// decode reads a feature vector from the next length bytes of the io.Reader,
+// assuming each byte has width feature bits encoded per byte.
+func (fv *RawFeatureVector) decode(r io.Reader, length, width int) error {
 	// Read the feature vector data.
 	data := make([]byte, length)
 	if _, err := io.ReadFull(r, data); err != nil {
@@ -148,10 +226,10 @@ func (fv *RawFeatureVector) Decode(r io.Reader) error {
 	}
 
 	// Set feature bits from parsed data.
-	bitsNumber := len(data) * 8
+	bitsNumber := len(data) * width
 	for i := 0; i < bitsNumber; i++ {
-		byteIndex := uint16(i / 8)
-		bitIndex := uint(i % 8)
+		byteIndex := int(i / width)
+		bitIndex := uint(i % width)
 		if (data[length-byteIndex-1]>>bitIndex)&1 == 1 {
 			fv.Set(FeatureBit(i))
 		}

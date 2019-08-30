@@ -1,39 +1,62 @@
 package discovery
 
 import (
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
-	"github.com/roasbeef/btcd/btcec"
 )
 
-// createChanAnnouncement is a helper function which creates all channel
+// CreateChanAnnouncement is a helper function which creates all channel
 // announcements given the necessary channel related database items. This
-// function is used to transform out databse structs into the coresponding wire
-// sturcts for announcing new channels to other peers, or simply syncing up a
+// function is used to transform out database structs into the corresponding wire
+// structs for announcing new channels to other peers, or simply syncing up a
 // peer's initial routing table upon connect.
-func createChanAnnouncement(chanProof *channeldb.ChannelAuthProof,
+func CreateChanAnnouncement(chanProof *channeldb.ChannelAuthProof,
 	chanInfo *channeldb.ChannelEdgeInfo,
 	e1, e2 *channeldb.ChannelEdgePolicy) (*lnwire.ChannelAnnouncement,
-	*lnwire.ChannelUpdate, *lnwire.ChannelUpdate) {
+	*lnwire.ChannelUpdate, *lnwire.ChannelUpdate, error) {
 
 	// First, using the parameters of the channel, along with the channel
 	// authentication chanProof, we'll create re-create the original
 	// authenticated channel announcement.
 	chanID := lnwire.NewShortChanIDFromInt(chanInfo.ChannelID)
 	chanAnn := &lnwire.ChannelAnnouncement{
-		NodeSig1:       chanProof.NodeSig1,
-		NodeSig2:       chanProof.NodeSig2,
-		ShortChannelID: chanID,
-		BitcoinSig1:    chanProof.BitcoinSig1,
-		BitcoinSig2:    chanProof.BitcoinSig2,
-		NodeID1:        chanInfo.NodeKey1,
-		NodeID2:        chanInfo.NodeKey2,
-		ChainHash:      chanInfo.ChainHash,
-		BitcoinKey1:    chanInfo.BitcoinKey1,
-		Features:       lnwire.NewRawFeatureVector(),
-		BitcoinKey2:    chanInfo.BitcoinKey2,
+		ShortChannelID:  chanID,
+		NodeID1:         chanInfo.NodeKey1Bytes,
+		NodeID2:         chanInfo.NodeKey2Bytes,
+		ChainHash:       chanInfo.ChainHash,
+		BitcoinKey1:     chanInfo.BitcoinKey1Bytes,
+		BitcoinKey2:     chanInfo.BitcoinKey2Bytes,
+		Features:        lnwire.NewRawFeatureVector(),
+		ExtraOpaqueData: chanInfo.ExtraOpaqueData,
+	}
+
+	var err error
+	chanAnn.BitcoinSig1, err = lnwire.NewSigFromRawSignature(
+		chanProof.BitcoinSig1Bytes,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	chanAnn.BitcoinSig2, err = lnwire.NewSigFromRawSignature(
+		chanProof.BitcoinSig2Bytes,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	chanAnn.NodeSig1, err = lnwire.NewSigFromRawSignature(
+		chanProof.NodeSig1Bytes,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	chanAnn.NodeSig2, err = lnwire.NewSigFromRawSignature(
+		chanProof.NodeSig2Bytes,
+	)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// We'll unconditionally queue the channel's existence chanProof as it
@@ -46,32 +69,44 @@ func createChanAnnouncement(chanProof *channeldb.ChannelAuthProof,
 	var edge1Ann, edge2Ann *lnwire.ChannelUpdate
 	if e1 != nil {
 		edge1Ann = &lnwire.ChannelUpdate{
-			Signature:       e1.Signature,
 			ChainHash:       chanInfo.ChainHash,
 			ShortChannelID:  chanID,
 			Timestamp:       uint32(e1.LastUpdate.Unix()),
-			Flags:           e1.Flags,
+			MessageFlags:    e1.MessageFlags,
+			ChannelFlags:    e1.ChannelFlags,
 			TimeLockDelta:   e1.TimeLockDelta,
 			HtlcMinimumMsat: e1.MinHTLC,
+			HtlcMaximumMsat: e1.MaxHTLC,
 			BaseFee:         uint32(e1.FeeBaseMSat),
 			FeeRate:         uint32(e1.FeeProportionalMillionths),
+			ExtraOpaqueData: e1.ExtraOpaqueData,
+		}
+		edge1Ann.Signature, err = lnwire.NewSigFromRawSignature(e1.SigBytes)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 	}
 	if e2 != nil {
 		edge2Ann = &lnwire.ChannelUpdate{
-			Signature:       e2.Signature,
 			ChainHash:       chanInfo.ChainHash,
 			ShortChannelID:  chanID,
 			Timestamp:       uint32(e2.LastUpdate.Unix()),
-			Flags:           e2.Flags,
+			MessageFlags:    e2.MessageFlags,
+			ChannelFlags:    e2.ChannelFlags,
 			TimeLockDelta:   e2.TimeLockDelta,
 			HtlcMinimumMsat: e2.MinHTLC,
+			HtlcMaximumMsat: e2.MaxHTLC,
 			BaseFee:         uint32(e2.FeeBaseMSat),
 			FeeRate:         uint32(e2.FeeProportionalMillionths),
+			ExtraOpaqueData: e2.ExtraOpaqueData,
+		}
+		edge2Ann.Signature, err = lnwire.NewSigFromRawSignature(e2.SigBytes)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 	}
 
-	return chanAnn, edge1Ann, edge2Ann
+	return chanAnn, edge1Ann, edge2Ann, nil
 }
 
 // copyPubKey performs a copy of the target public key, setting a fresh curve
@@ -110,4 +145,20 @@ func SignAnnouncement(signer lnwallet.MessageSigner, pubKey *btcec.PublicKey,
 	}
 
 	return signer.SignMessage(pubKey, data)
+}
+
+// remotePubFromChanInfo returns the public key of the remote peer given a
+// ChannelEdgeInfo that describe a channel we have with them.
+func remotePubFromChanInfo(chanInfo *channeldb.ChannelEdgeInfo,
+	chanFlags lnwire.ChanUpdateChanFlags) [33]byte {
+
+	var remotePubKey [33]byte
+	switch {
+	case chanFlags&lnwire.ChanUpdateDirection == 0:
+		remotePubKey = chanInfo.NodeKey2Bytes
+	case chanFlags&lnwire.ChanUpdateDirection == 1:
+		remotePubKey = chanInfo.NodeKey1Bytes
+	}
+
+	return remotePubKey
 }

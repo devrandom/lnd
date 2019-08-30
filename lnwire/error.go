@@ -48,6 +48,13 @@ func (e ErrorCode) String() string {
 	}
 }
 
+// Error returns the human redable version of the target ErrorCode.
+//
+// Satisfies the Error interface.
+func (e ErrorCode) Error() string {
+	return e.String()
+}
+
 // ErrorData is a set of bytes associated with a particular sent error. A
 // receiving node SHOULD only print out data verbatim if the string is composed
 // solely of printable ASCII characters. For reference, the printable character
@@ -85,7 +92,7 @@ var _ Message = (*Error)(nil)
 //
 // This is part of the lnwire.Message interface.
 func (c *Error) Decode(r io.Reader, pver uint32) error {
-	return readElements(r,
+	return ReadElements(r,
 		&c.ChanID,
 		&c.Data,
 	)
@@ -96,7 +103,7 @@ func (c *Error) Decode(r io.Reader, pver uint32) error {
 //
 // This is part of the lnwire.Message interface.
 func (c *Error) Encode(w io.Writer, pver uint32) error {
-	return writeElements(w,
+	return WriteElements(w,
 		c.ChanID,
 		c.Data,
 	)
@@ -110,11 +117,11 @@ func (c *Error) MsgType() MessageType {
 	return MsgError
 }
 
-// MaxPayloadLength returns the maximum allowed payload size for a Error
+// MaxPayloadLength returns the maximum allowed payload size for an Error
 // complete message observing the specified protocol version.
 //
 // This is part of the lnwire.Message interface.
 func (c *Error) MaxPayloadLength(uint32) uint32 {
-	// 32 + 2 + 655326
-	return 65536
+	// 32 + 2 + 65501
+	return 65535
 }

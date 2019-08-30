@@ -44,8 +44,12 @@ RPCPASS=$(set_default "$RPCPASS" "devpass")
 DEBUG=$(set_default "$DEBUG" "info")
 NETWORK=$(set_default "$NETWORK" "simnet")
 
-PARAMS=$(echo \
-    "--$NETWORK" \
+PARAMS=""
+if [ "$NETWORK" != "mainnet" ]; then
+   PARAMS=$(echo --$NETWORK)
+fi
+
+PARAMS=$(echo $PARAMS \
     "--debuglevel=$DEBUG" \
     "--txindex" \
     "--rpcuser=$RPCUSER" \
@@ -54,7 +58,8 @@ PARAMS=$(echo \
     "--logdir=/data" \
     "--rpccert=/rpc/rpc.cert" \
     "--rpckey=/rpc/rpc.key" \
-    "--rpclisten=0.0.0.0"
+    "--rpclisten=0.0.0.0" \
+    "--txindex"
 )
 
 MINING_ADDRESS_FILE=/rpc/mining_address
@@ -77,5 +82,5 @@ PARAMS="$PARAMS $@"
 
 # Print command and start bitcoin node.
 echo "Command: btcd $PARAMS"
-btcd $PARAMS
+exec btcd $PARAMS
 

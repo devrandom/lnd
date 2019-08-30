@@ -1,6 +1,17 @@
-FROM golang:1.7
+FROM golang:1.12-alpine as builder
 
 MAINTAINER Olaoluwa Osuntokun <lightning.engineering>
+
+# Grab and install the latest version of roasbeef's fork of ltcd and all
+# related dependencies.
+WORKDIR $GOPATH/src/github.com/ltcsuite/ltcd
+RUN apk add --no-cache --update alpine-sdk git
+RUN git clone https://github.com/ltcsuite/ltcd ./
+RUN GO111MODULE=on go install -v . ./cmd/...
+RUN GO111MODULE=on go install . ./cmd/ltcctl ./cmd/gencerts
+
+# Start a new image
+FROM alpine as final
 
 # Expose mainnet ports (server, rpc)
 EXPOSE 8333 8334
@@ -14,31 +25,28 @@ EXPOSE 18555 18556
 # Expose segnet ports (server, rpc)
 EXPOSE 28901 28902
 
-# Grab and install the latest version of roasbeef's fork of ltcd and all
-# related dependencies.
-WORKDIR $GOPATH/src/github.com/ltcsuite/ltcd
-RUN git clone https://github.com/ltcsuite/ltcd ./
-RUN go get -u github.com/Masterminds/glide
-RUN glide install
-RUN go install . ./cmd/ltcctl ./cmd/gencerts
+# Copy the compiled binaries from the builder image.
+COPY --from=builder /go/bin/ltcctl /bin/
+COPY --from=builder /go/bin/ltcd /bin/
+COPY --from=builder /go/bin/gencerts /bin/
 
-RUN mkdir "/rpc" "/root/.ltcd" "/root/.ltcctl"
-RUN touch "/root/.ltcd/ltcd.conf"
+COPY "start-ltcctl.sh" .
+COPY "start-ltcd.sh" .
 
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+&&  chmod +x start-ltcctl.sh \
+&&  chmod +x start-ltcd.sh \
+&&  mkdir "/rpc" "/root/.ltcd" "/root/.ltcctl" \
+&&  touch "/root/.ltcd/ltcd.conf" \
 # "ltcctl" and "lnd" to "ltcd" over docker links.
-RUN "/go/bin/gencerts" --host="*" --directory="/rpc" --force
+&&  "/bin/gencerts" --host="*" --directory="/rpc" --force
 
 # Create a volume to house pregenerated RPC credentials. This will be
 # shared with any lnd, btcctl containers so they can securely query ltcd's RPC
 # server.
 # You should NOT do this before certificate generation!
-# Otherwise manually generated certificate will be overriden with shared
+# Otherwise manually generated certificate will be overridden with shared
 # mounted volume! For more info read dockerfile "VOLUME" documentation.
 VOLUME ["/rpc"]
-
-COPY "start-ltcctl.sh" .
-COPY "start-ltcd.sh" .
-
-RUN chmod +x start-ltcctl.sh
-RUN chmod +x start-ltcd.sh
-

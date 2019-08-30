@@ -10,15 +10,16 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/shachain"
-	"github.com/roasbeef/btcd/btcec"
-	"github.com/roasbeef/btcd/chaincfg"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
-	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
 )
 
 var (
@@ -81,6 +82,8 @@ var (
 		Index: 0,
 	}
 	privKey, pubKey = btcec.PrivKeyFromBytes(btcec.S256(), key[:])
+
+	wireSig, _ = lnwire.NewSigFromSignature(testSig)
 )
 
 // makeTestDB creates a new instance of the ChannelDB for testing purposes. A
@@ -133,13 +136,23 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 			ChanReserve:      btcutil.Amount(rand.Int63()),
 			MinHTLC:          lnwire.MilliSatoshi(rand.Int63()),
 			MaxAcceptedHtlcs: uint16(rand.Int31()),
+			CsvDelay:         uint16(rand.Int31()),
 		},
-		CsvDelay:            uint16(rand.Int31()),
-		MultiSigKey:         privKey.PubKey(),
-		RevocationBasePoint: privKey.PubKey(),
-		PaymentBasePoint:    privKey.PubKey(),
-		DelayBasePoint:      privKey.PubKey(),
-		HtlcBasePoint:       privKey.PubKey(),
+		MultiSigKey: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+		},
+		RevocationBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+		},
+		PaymentBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+		},
+		DelayBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+		},
+		HtlcBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+		},
 	}
 	remoteCfg := ChannelConfig{
 		ChannelConstraints: ChannelConstraints{
@@ -148,13 +161,43 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 			ChanReserve:      btcutil.Amount(rand.Int63()),
 			MinHTLC:          lnwire.MilliSatoshi(rand.Int63()),
 			MaxAcceptedHtlcs: uint16(rand.Int31()),
+			CsvDelay:         uint16(rand.Int31()),
 		},
-		CsvDelay:            uint16(rand.Int31()),
-		MultiSigKey:         privKey.PubKey(),
-		RevocationBasePoint: privKey.PubKey(),
-		PaymentBasePoint:    privKey.PubKey(),
-		DelayBasePoint:      privKey.PubKey(),
-		HtlcBasePoint:       privKey.PubKey(),
+		MultiSigKey: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyMultiSig,
+				Index:  9,
+			},
+		},
+		RevocationBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyRevocationBase,
+				Index:  8,
+			},
+		},
+		PaymentBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyPaymentBase,
+				Index:  7,
+			},
+		},
+		DelayBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyDelayBase,
+				Index:  6,
+			},
+		},
+		HtlcBasePoint: keychain.KeyDescriptor{
+			PubKey: privKey.PubKey(),
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyHtlcBase,
+				Index:  5,
+			},
+		},
 	}
 
 	chanID := lnwire.NewShortChanIDFromInt(uint64(rand.Int63()))
@@ -162,8 +205,8 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 	return &OpenChannel{
 		ChanType:          SingleFunder,
 		ChainHash:         key,
-		FundingOutpoint:   *testOutpoint,
-		ShortChanID:       chanID,
+		FundingOutpoint:   wire.OutPoint{Hash: key, Index: rand.Uint32()},
+		ShortChannelID:    chanID,
 		IsInitiator:       true,
 		IsPending:         true,
 		IdentityPub:       pubKey,
@@ -196,6 +239,8 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 		RevocationProducer:      producer,
 		RevocationStore:         store,
 		Db:                      cdb,
+		Packager:                NewChannelPackager(chanID),
+		FundingTxn:              testTx,
 	}, nil
 }
 
@@ -203,10 +248,10 @@ func TestOpenChannelPutGetDelete(t *testing.T) {
 	t.Parallel()
 
 	cdb, cleanUp, err := makeTestDB()
-	defer cleanUp()
 	if err != nil {
 		t.Fatalf("unable to make test database: %v", err)
 	}
+	defer cleanUp()
 
 	// Create the test channel state, then add an additional fake HTLC
 	// before syncing to disk.
@@ -323,10 +368,10 @@ func TestChannelStateTransition(t *testing.T) {
 	t.Parallel()
 
 	cdb, cleanUp, err := makeTestDB()
-	defer cleanUp()
 	if err != nil {
 		t.Fatalf("unable to make test database: %v", err)
 	}
+	defer cleanUp()
 
 	// First create a minimal channel, then perform a full sync in order to
 	// persist the data.
@@ -428,10 +473,10 @@ func TestChannelStateTransition(t *testing.T) {
 		Commitment: remoteCommit,
 		CommitSig: &lnwire.CommitSig{
 			ChanID:    lnwire.ChannelID(key),
-			CommitSig: testSig,
-			HtlcSigs: []*btcec.Signature{
-				testSig,
-				testSig,
+			CommitSig: wireSig,
+			HtlcSigs: []lnwire.Sig{
+				wireSig,
+				wireSig,
 			},
 		},
 		LogUpdates: []LogUpdate{
@@ -452,6 +497,8 @@ func TestChannelStateTransition(t *testing.T) {
 				},
 			},
 		},
+		OpenedCircuitKeys: []CircuitKey{},
+		ClosedCircuitKeys: []CircuitKey{},
 	}
 	copy(commitDiff.LogUpdates[0].UpdateMsg.(*lnwire.UpdateAddHTLC).PaymentHash[:],
 		bytes.Repeat([]byte{1}, 32))
@@ -461,7 +508,7 @@ func TestChannelStateTransition(t *testing.T) {
 		t.Fatalf("unable to add to commit chain: %v", err)
 	}
 
-	// The commitment tip should now match the the commitment that we just
+	// The commitment tip should now match the commitment that we just
 	// inserted.
 	diskCommitDiff, err := channel.RemoteCommitChainTip()
 	if err != nil {
@@ -486,17 +533,22 @@ func TestChannelStateTransition(t *testing.T) {
 		t.Fatalf("unable to generate key: %v", err)
 	}
 	channel.RemoteNextRevocation = newPriv.PubKey()
-	if err := channel.AdvanceCommitChainTail(); err != nil {
+
+	fwdPkg := NewFwdPkg(channel.ShortChanID(), oldRemoteCommit.CommitHeight,
+		diskCommitDiff.LogUpdates, nil)
+
+	err = channel.AdvanceCommitChainTail(fwdPkg)
+	if err != nil {
 		t.Fatalf("unable to append to revocation log: %v", err)
 	}
 
-	// At this point, the remote commit chain shuold be nil, and the posted
+	// At this point, the remote commit chain should be nil, and the posted
 	// remote commitment should match the one we added as a diff above.
 	if _, err := channel.RemoteCommitChainTip(); err != ErrNoPendingCommit {
 		t.Fatalf("expected ErrNoPendingCommit, instead got %v", err)
 	}
 
-	// We should be able to fetch the channel delta created above by it's
+	// We should be able to fetch the channel delta created above by its
 	// update number with all the state properly reconstructed.
 	diskPrevCommit, err := channel.FindPreviousState(
 		oldRemoteCommit.CommitHeight,
@@ -530,7 +582,11 @@ func TestChannelStateTransition(t *testing.T) {
 	if err := channel.AppendRemoteCommitChain(commitDiff); err != nil {
 		t.Fatalf("unable to add to commit chain: %v", err)
 	}
-	if err := channel.AdvanceCommitChainTail(); err != nil {
+
+	fwdPkg = NewFwdPkg(channel.ShortChanID(), oldRemoteCommit.CommitHeight, nil, nil)
+
+	err = channel.AdvanceCommitChainTail(fwdPkg)
+	if err != nil {
 		t.Fatalf("unable to append to revocation log: %v", err)
 	}
 
@@ -570,7 +626,7 @@ func TestChannelStateTransition(t *testing.T) {
 		SettledBalance:    btcutil.Amount(500),
 		TimeLockedBalance: btcutil.Amount(10000),
 		IsPending:         false,
-		CloseType:         ForceClose,
+		CloseType:         RemoteForceClose,
 	}
 	if err := updatedChannel[0].CloseChannel(closeSummary); err != nil {
 		t.Fatalf("unable to delete updated channel: %v", err)
@@ -591,7 +647,7 @@ func TestChannelStateTransition(t *testing.T) {
 	// revocation log has been deleted.
 	_, err = updatedChannel[0].FindPreviousState(oldRemoteCommit.CommitHeight)
 	if err == nil {
-		t.Fatal("revocation log search should've failed")
+		t.Fatal("revocation log search should have failed")
 	}
 }
 
@@ -600,7 +656,7 @@ func TestFetchPendingChannels(t *testing.T) {
 
 	cdb, cleanUp, err := makeTestDB()
 	if err != nil {
-		t.Fatalf("uanble to make test database: %v", err)
+		t.Fatalf("unable to make test database: %v", err)
 	}
 	defer cleanUp()
 
@@ -630,7 +686,7 @@ func TestFetchPendingChannels(t *testing.T) {
 			"got %v", 1, len(pendingChannels))
 	}
 
-	// The broadcast height of the pending channel should've been set
+	// The broadcast height of the pending channel should have been set
 	// properly.
 	if pendingChannels[0].FundingBroadcastHeight != broadcastHeight {
 		t.Fatalf("broadcast height mismatch: expected %v, got %v",
@@ -648,15 +704,25 @@ func TestFetchPendingChannels(t *testing.T) {
 		t.Fatalf("unable to mark channel as open: %v", err)
 	}
 
+	if pendingChannels[0].IsPending {
+		t.Fatalf("channel marked open should no longer be pending")
+	}
+
+	if pendingChannels[0].ShortChanID() != chanOpenLoc {
+		t.Fatalf("channel opening height not updated: expected %v, "+
+			"got %v", spew.Sdump(pendingChannels[0].ShortChanID()),
+			chanOpenLoc)
+	}
+
 	// Next, we'll re-fetch the channel to ensure that the open height was
 	// properly set.
 	openChans, err := cdb.FetchAllChannels()
 	if err != nil {
 		t.Fatalf("unable to fetch channels: %v", err)
 	}
-	if openChans[0].ShortChanID != chanOpenLoc {
+	if openChans[0].ShortChanID() != chanOpenLoc {
 		t.Fatalf("channel opening heights don't match: expected %v, "+
-			"got %v", spew.Sdump(openChans[0].ShortChanID),
+			"got %v", spew.Sdump(openChans[0].ShortChanID()),
 			chanOpenLoc)
 	}
 	if openChans[0].FundingBroadcastHeight != broadcastHeight {
@@ -724,8 +790,9 @@ func TestFetchClosedChannels(t *testing.T) {
 		Capacity:          state.Capacity,
 		SettledBalance:    state.LocalCommitment.LocalBalance.ToSatoshis(),
 		TimeLockedBalance: state.RemoteCommitment.LocalBalance.ToSatoshis() + 10000,
-		CloseType:         ForceClose,
+		CloseType:         RemoteForceClose,
 		IsPending:         true,
+		LocalChanConfig:   state.LocalChanCfg,
 	}
 	if err := state.CloseChannel(summary); err != nil {
 		t.Fatalf("unable to close channel: %v", err)
@@ -736,7 +803,7 @@ func TestFetchClosedChannels(t *testing.T) {
 	// channels only, or not.
 	pendingClosed, err := cdb.FetchClosedChannels(true)
 	if err != nil {
-		t.Fatalf("failed fetcing closed channels: %v", err)
+		t.Fatalf("failed fetching closed channels: %v", err)
 	}
 	if len(pendingClosed) != 1 {
 		t.Fatalf("incorrect number of pending closed channels: expecting %v,"+
@@ -769,7 +836,7 @@ func TestFetchClosedChannels(t *testing.T) {
 	// be retrieved when fetching all the closed channels.
 	closed, err = cdb.FetchClosedChannels(false)
 	if err != nil {
-		t.Fatalf("failed fetcing closed channels: %v", err)
+		t.Fatalf("failed fetching closed channels: %v", err)
 	}
 	if len(closed) != 1 {
 		t.Fatalf("incorrect number of closed channels: expecting %v, "+
@@ -782,5 +849,180 @@ func TestFetchClosedChannels(t *testing.T) {
 	if len(pendingClose) != 0 {
 		t.Fatalf("incorrect number of closed channels: expecting %v, "+
 			"got %v", 0, len(closed))
+	}
+}
+
+// TestFetchWaitingCloseChannels ensures that the correct channels that are
+// waiting to be closed are returned.
+func TestFetchWaitingCloseChannels(t *testing.T) {
+	t.Parallel()
+
+	const numChannels = 2
+	const broadcastHeight = 99
+	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 18555}
+
+	// We'll start by creating two channels within our test database. One of
+	// them will have their funding transaction confirmed on-chain, while
+	// the other one will remain unconfirmed.
+	db, cleanUp, err := makeTestDB()
+	if err != nil {
+		t.Fatalf("unable to make test database: %v", err)
+	}
+	defer cleanUp()
+
+	channels := make([]*OpenChannel, numChannels)
+	for i := 0; i < numChannels; i++ {
+		channel, err := createTestChannelState(db)
+		if err != nil {
+			t.Fatalf("unable to create channel: %v", err)
+		}
+		err = channel.SyncPending(addr, broadcastHeight)
+		if err != nil {
+			t.Fatalf("unable to sync channel: %v", err)
+		}
+		channels[i] = channel
+	}
+
+	// We'll only confirm the first one.
+	channelConf := lnwire.ShortChannelID{
+		BlockHeight: broadcastHeight + 1,
+		TxIndex:     10,
+		TxPosition:  15,
+	}
+	if err := channels[0].MarkAsOpen(channelConf); err != nil {
+		t.Fatalf("unable to mark channel as open: %v", err)
+	}
+
+	// Then, we'll mark the channels as if their commitments were broadcast.
+	// This would happen in the event of a force close and should make the
+	// channels enter a state of waiting close.
+	for _, channel := range channels {
+		if err := channel.MarkCommitmentBroadcasted(); err != nil {
+			t.Fatalf("unable to mark commitment broadcast: %v", err)
+		}
+	}
+
+	// Now, we'll fetch all the channels waiting to be closed from the
+	// database. We should expect to see both channels above, even if any of
+	// them haven't had their funding transaction confirm on-chain.
+	waitingCloseChannels, err := db.FetchWaitingCloseChannels()
+	if err != nil {
+		t.Fatalf("unable to fetch all waiting close channels: %v", err)
+	}
+	if len(waitingCloseChannels) != 2 {
+		t.Fatalf("expected %d channels waiting to be closed, got %d", 2,
+			len(waitingCloseChannels))
+	}
+	expectedChannels := make(map[wire.OutPoint]struct{})
+	for _, channel := range channels {
+		expectedChannels[channel.FundingOutpoint] = struct{}{}
+	}
+	for _, channel := range waitingCloseChannels {
+		if _, ok := expectedChannels[channel.FundingOutpoint]; !ok {
+			t.Fatalf("expected channel %v to be waiting close",
+				channel.FundingOutpoint)
+		}
+	}
+}
+
+// TestRefreshShortChanID asserts that RefreshShortChanID updates the in-memory
+// short channel ID of another OpenChannel to reflect a preceding call to
+// MarkOpen on a different OpenChannel.
+func TestRefreshShortChanID(t *testing.T) {
+	t.Parallel()
+
+	cdb, cleanUp, err := makeTestDB()
+	if err != nil {
+		t.Fatalf("unable to make test database: %v", err)
+	}
+	defer cleanUp()
+
+	// First create a test channel.
+	state, err := createTestChannelState(cdb)
+	if err != nil {
+		t.Fatalf("unable to create channel state: %v", err)
+	}
+
+	addr := &net.TCPAddr{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: 18555,
+	}
+
+	// Mark the channel as pending within the channeldb.
+	const broadcastHeight = 99
+	if err := state.SyncPending(addr, broadcastHeight); err != nil {
+		t.Fatalf("unable to save and serialize channel state: %v", err)
+	}
+
+	// Next, locate the pending channel with the database.
+	pendingChannels, err := cdb.FetchPendingChannels()
+	if err != nil {
+		t.Fatalf("unable to load pending channels; %v", err)
+	}
+
+	var pendingChannel *OpenChannel
+	for _, channel := range pendingChannels {
+		if channel.FundingOutpoint == state.FundingOutpoint {
+			pendingChannel = channel
+			break
+		}
+	}
+	if pendingChannel == nil {
+		t.Fatalf("unable to find pending channel with funding "+
+			"outpoint=%v: %v", state.FundingOutpoint, err)
+	}
+
+	// Next, simulate the confirmation of the channel by marking it as
+	// pending within the database.
+	chanOpenLoc := lnwire.ShortChannelID{
+		BlockHeight: 105,
+		TxIndex:     10,
+		TxPosition:  15,
+	}
+
+	err = state.MarkAsOpen(chanOpenLoc)
+	if err != nil {
+		t.Fatalf("unable to mark channel open: %v", err)
+	}
+
+	// The short_chan_id of the receiver to MarkAsOpen should reflect the
+	// open location, but the other pending channel should remain unchanged.
+	if state.ShortChanID() == pendingChannel.ShortChanID() {
+		t.Fatalf("pending channel short_chan_ID should not have been " +
+			"updated before refreshing short_chan_id")
+	}
+
+	// Now that the receiver's short channel id has been updated, check to
+	// ensure that the channel packager's source has been updated as well.
+	// This ensures that the packager will read and write to buckets
+	// corresponding to the new short chan id, instead of the prior.
+	if state.Packager.(*ChannelPackager).source != chanOpenLoc {
+		t.Fatalf("channel packager source was not updated: want %v, "+
+			"got %v", chanOpenLoc,
+			state.Packager.(*ChannelPackager).source)
+	}
+
+	// Now, refresh the short channel ID of the pending channel.
+	err = pendingChannel.RefreshShortChanID()
+	if err != nil {
+		t.Fatalf("unable to refresh short_chan_id: %v", err)
+	}
+
+	// This should result in both OpenChannel's now having the same
+	// ShortChanID.
+	if state.ShortChanID() != pendingChannel.ShortChanID() {
+		t.Fatalf("expected pending channel short_chan_id to be "+
+			"refreshed: want %v, got %v", state.ShortChanID(),
+			pendingChannel.ShortChanID())
+	}
+
+	// Check to ensure that the _other_ OpenChannel channel packager's
+	// source has also been updated after the refresh. This ensures that the
+	// other packagers will read and write to buckets corresponding to the
+	// updated short chan id.
+	if pendingChannel.Packager.(*ChannelPackager).source != chanOpenLoc {
+		t.Fatalf("channel packager source was not updated: want %v, "+
+			"got %v", chanOpenLoc,
+			pendingChannel.Packager.(*ChannelPackager).source)
 	}
 }

@@ -1,18 +1,15 @@
-package main
+package lnd
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
-	"github.com/roasbeef/btcd/btcec"
-	"github.com/roasbeef/btcd/txscript"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
 )
 
 var (
@@ -21,7 +18,7 @@ var (
 	ErrChanAlreadyClosing = fmt.Errorf("channel shutdown already initiated")
 
 	// ErrChanCloseNotFinished is returned when a caller attempts to access
-	// a field or function that is continent on the channel closure
+	// a field or function that is contingent on the channel closure
 	// negotiation already being completed.
 	ErrChanCloseNotFinished = fmt.Errorf("close negotiation not finished")
 
@@ -37,8 +34,8 @@ var (
 type closeState uint8
 
 const (
-	// closeIdle is the initial starting state. In this state, the stat
-	// machine has been instantiated, but not state transitions have been
+	// closeIdle is the initial starting state. In this state, the state
+	// machine has been instantiated, but no state transitions have been
 	// attempted. If a state machine receives a message while in this
 	// state, then it is the responder to an initiated cooperative channel
 	// closure.
@@ -52,16 +49,16 @@ const (
 	closeShutdownInitiated
 
 	// closeFeeNegotiation is the third, and most persistent state. Both
-	// parties enter this state after they've sent and receive a shutdown
+	// parties enter this state after they've sent and received a shutdown
 	// message. During this phase, both sides will send monotonically
 	// increasing fee requests until one side accepts the last fee rate
 	// offered by the other party. In this case, the party will broadcast
 	// the closing transaction, and send the accepted fee to the remote
-	// party. This then causes a shift into the close finished state.
+	// party. This then causes a shift into the closeFinished state.
 	closeFeeNegotiation
 
 	// closeFinished is the final state of the state machine. In this,
-	// state, a side has accepted a fee offer and has broadcast the valid
+	// state a side has accepted a fee offer and has broadcast the valid
 	// closing transaction to the network. During this phase, the closing
 	// transaction becomes available for examination.
 	closeFinished
@@ -76,18 +73,17 @@ type chanCloseCfg struct {
 	// unregisterChannel is a function closure that allows the
 	// channelCloser to re-register a channel. Once this has been done, no
 	// further HTLC's should be routed through the channel.
-	unregisterChannel func(lnwire.ChannelID) error
+	unregisterChannel func(lnwire.ChannelID)
 
 	// broadcastTx broadcasts the passed transaction to the network.
 	broadcastTx func(*wire.MsgTx) error
 
-	// settledContracts is a channel that will be sent upon once the
-	// channel is partially closed. This notifies any sub-systems that they
-	// no longer need to watch the channel for any on-chain activity.
-	settledContracts chan<- *wire.OutPoint
+	// disableChannel disables a channel, resulting in it not being able to
+	// forward payments.
+	disableChannel func(wire.OutPoint) error
 
 	// quit is a channel that should be sent upon in the occasion the state
-	// machine shouldk cease all progress and shutdown.
+	// machine should cease all progress and shutdown.
 	quit chan struct{}
 }
 
@@ -154,16 +150,14 @@ type channelCloser struct {
 // passed configuration, and delivery+fee preference. The final argument should
 // only be populated iff, we're the initiator of this closing request.
 func newChannelCloser(cfg chanCloseCfg, deliveryScript []byte,
-	idealFeePerkw btcutil.Amount, negotiationHeight uint32,
+	idealFeePerKw lnwallet.SatPerKWeight, negotiationHeight uint32,
 	closeReq *htlcswitch.ChanClose) *channelCloser {
 
 	// Given the target fee-per-kw, we'll compute what our ideal _total_
 	// fee will be starting at for this fee negotiation.
 	//
 	// TODO(roasbeef): should factor in minimal commit
-	idealFeeSat := btcutil.Amount(
-		cfg.channel.CalcFee(uint64(idealFeePerkw)),
-	)
+	idealFeeSat := cfg.channel.CalcFee(idealFeePerKw)
 
 	// If this fee is greater than the fee currently present within the
 	// commitment transaction, then we'll clamp it down to be within the
@@ -196,7 +190,7 @@ func newChannelCloser(cfg chanCloseCfg, deliveryScript []byte,
 	}
 }
 
-// initChanShutdown beings the shutdown process by un-registering the channel,
+// initChanShutdown begins the shutdown process by un-registering the channel,
 // and creating a valid shutdown message to our target delivery address.
 func (c *channelCloser) initChanShutdown() (*lnwire.Shutdown, error) {
 	// With both items constructed we'll now send the shutdown message for
@@ -207,7 +201,7 @@ func (c *channelCloser) initChanShutdown() (*lnwire.Shutdown, error) {
 	// TODO(roasbeef): err if channel has htlc's?
 
 	// Before returning the shutdown message, we'll unregister the channel
-	// to ensure that it isn't see as usable within the system.
+	// to ensure that it isn't seen as usable within the system.
 	//
 	// TODO(roasbeef): fail if err?
 	c.cfg.unregisterChannel(c.cid)
@@ -218,8 +212,8 @@ func (c *channelCloser) initChanShutdown() (*lnwire.Shutdown, error) {
 }
 
 // ShutdownChan is the first method that's to be called by the initiator of the
-// cooperative channel closure. This message returns the shutdown message to to
-// sent to the remote party. Upon completion, we enter the
+// cooperative channel closure. This message returns the shutdown message to
+// send to the remote party. Upon completion, we enter the
 // closeShutdownInitiated phase as we await a response.
 func (c *channelCloser) ShutdownChan() (*lnwire.Shutdown, error) {
 	// If we attempt to shutdown the channel for the first time, and we're
@@ -247,7 +241,7 @@ func (c *channelCloser) ShutdownChan() (*lnwire.Shutdown, error) {
 
 // ClosingTx returns the fully signed, final closing transaction.
 //
-// NOTE: THis transaction is only available if the state machine is in the
+// NOTE: This transaction is only available if the state machine is in the
 // closeFinished state.
 func (c *channelCloser) ClosingTx() (*wire.MsgTx, error) {
 	// If the state machine hasn't finished closing the channel then we'll
@@ -293,7 +287,7 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 		// transaction.
 		c.remoteDeliveryScript = shutDownMsg.Address
 
-		// We'll generate a shutdown message of our own to set across
+		// We'll generate a shutdown message of our own to send across
 		// the wire.
 		localShutdown, err := c.initChanShutdown()
 		if err != nil {
@@ -303,8 +297,8 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 		peerLog.Infof("ChannelPoint(%v): Responding to shutdown",
 			c.chanPoint)
 
-		msgsToSend := make([]lnwire.Message, 2)
-		msgsToSend[0] = localShutdown
+		msgsToSend := make([]lnwire.Message, 0, 2)
+		msgsToSend = append(msgsToSend, localShutdown)
 
 		// After the other party receives this message, we'll actually
 		// start the final stage of the closure process: fee
@@ -313,14 +307,16 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 		c.state = closeFeeNegotiation
 
 		// We'll also craft our initial close proposal in order to keep
-		// the negotiation moving.
-		closeSigned, err := c.proposeCloseSigned(c.idealFeeSat)
-		if err != nil {
-			return nil, false, err
+		// the negotiation moving, but only if we're the negotiator.
+		if c.cfg.channel.IsInitiator() {
+			closeSigned, err := c.proposeCloseSigned(c.idealFeeSat)
+			if err != nil {
+				return nil, false, err
+			}
+			msgsToSend = append(msgsToSend, closeSigned)
 		}
-		msgsToSend[1] = closeSigned
 
-		// We'll return both sent of messages to sent to the remote
+		// We'll return both sets of messages to send to the remote
 		// party to kick off the fee negotiation process.
 		return msgsToSend, false, nil
 
@@ -349,16 +345,22 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 			"entering fee negotiation", c.chanPoint)
 
 		// Starting with our ideal fee rate, we'll create an initial
-		// closing proposal.
-		closeSigned, err := c.proposeCloseSigned(c.idealFeeSat)
-		if err != nil {
-			return nil, false, err
+		// closing proposal, but only if we're the initiator, as
+		// otherwise, the other party will send their first proposal
+		// first.
+		if c.cfg.channel.IsInitiator() {
+			closeSigned, err := c.proposeCloseSigned(c.idealFeeSat)
+			if err != nil {
+				return nil, false, err
+			}
+
+			return []lnwire.Message{closeSigned}, false, nil
 		}
 
-		return []lnwire.Message{closeSigned}, false, nil
+		return nil, false, nil
 
 	// If we're receiving a message while we're in the fee negotiation
-	// phase, then this indicates the remote party is responding a closed
+	// phase, then this indicates the remote party is responding to a closed
 	// signed message we sent, or kicking off the process with their own.
 	case closeFeeNegotiation:
 		// First, we'll assert that we're actually getting a
@@ -410,13 +412,13 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 		// transaction!  We'll craft the final closing transaction so
 		// we can broadcast it to the network.
 		matchingSig := c.priorFeeOffers[remoteProposedFee].Signature
-		localSig := append(
-			matchingSig.Serialize(), byte(txscript.SigHashAll),
-		)
-		remoteSig := append(
-			closeSignedMsg.Signature.Serialize(), byte(txscript.SigHashAll),
-		)
-		closeTx, err := c.cfg.channel.CompleteCooperativeClose(
+		localSigBytes := matchingSig.ToSignatureBytes()
+		localSig := append(localSigBytes, byte(txscript.SigHashAll))
+
+		remoteSigBytes := closeSignedMsg.Signature.ToSignatureBytes()
+		remoteSig := append(remoteSigBytes, byte(txscript.SigHashAll))
+
+		closeTx, _, err := c.cfg.channel.CompleteCooperativeClose(
 			localSig, remoteSig, c.localDeliveryScript,
 			c.remoteDeliveryScript, remoteProposedFee,
 		)
@@ -425,6 +427,14 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 		}
 		c.closingTx = closeTx
 
+		// Before closing, we'll attempt to send a disable update for
+		// the channel. We do so before closing the channel as otherwise
+		// the current edge policy won't be retrievable from the graph.
+		if err := c.cfg.disableChannel(c.chanPoint); err != nil {
+			peerLog.Warnf("Unable to disable channel %v on "+
+				"close: %v", c.chanPoint, err)
+		}
+
 		// With the closing transaction crafted, we'll now broadcast it
 		// to the network.
 		peerLog.Infof("Broadcasting cooperative close tx: %v",
@@ -432,54 +442,18 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 				return spew.Sdump(closeTx)
 			}))
 		if err := c.cfg.broadcastTx(closeTx); err != nil {
-			// TODO(halseth): add relevant error types to the
-			// WalletController interface as this is quite fragile.
-			switch {
-			case strings.Contains(err.Error(), "already exists"):
-				fallthrough
-			case strings.Contains(err.Error(), "already have"):
-				peerLog.Debugf("channel close tx from "+
-					"ChannelPoint(%v) already exist, "+
-					"probably broadcast by peer: %v",
-					c.chanPoint, err)
-			default:
-				return nil, false, err
-			}
-		}
-
-		// As this contract is final, we'll send it over the settled
-		// contracts channel.
-		select {
-		case c.cfg.settledContracts <- &c.chanPoint:
-		case <-c.cfg.quit:
-			return nil, false, fmt.Errorf("peer shutting down")
-		}
-
-		// Clear out the current channel state, marking the channel as
-		// being closed within the database.
-		closingTxid := closeTx.TxHash()
-		chanInfo := c.cfg.channel.StateSnapshot()
-		closeSummary := &channeldb.ChannelCloseSummary{
-			ChanPoint:      c.chanPoint,
-			ChainHash:      chanInfo.ChainHash,
-			ClosingTXID:    closingTxid,
-			RemotePub:      &chanInfo.RemoteIdentity,
-			Capacity:       chanInfo.Capacity,
-			SettledBalance: chanInfo.LocalBalance.ToSatoshis(),
-			CloseType:      channeldb.CooperativeClose,
-			IsPending:      true,
-		}
-		if err := c.cfg.channel.DeleteState(closeSummary); err != nil {
 			return nil, false, err
 		}
-
-		c.state = closeFinished
+		if err := c.cfg.channel.MarkCommitmentBroadcasted(); err != nil {
+			return nil, false, err
+		}
 
 		// Finally, we'll transition to the closeFinished state, and
 		// also return the final close signed message we sent.
 		// Additionally, we return true for the second argument to
 		// indicate we're finished with the channel closing
 		// negotiation.
+		c.state = closeFinished
 		matchingOffer := c.priorFeeOffers[remoteProposedFee]
 		return []lnwire.Message{matchingOffer}, true, nil
 
@@ -507,7 +481,8 @@ func (c *channelCloser) ProcessCloseMsg(msg lnwire.Message) ([]lnwire.Message, b
 // transaction for a channel based on the prior fee negotiations and our
 // current compromise fee.
 func (c *channelCloser) proposeCloseSigned(fee btcutil.Amount) (*lnwire.ClosingSigned, error) {
-	rawSig, err := c.cfg.channel.CreateCloseProposal(
+
+	rawSig, _, _, err := c.cfg.channel.CreateCloseProposal(
 		fee, c.localDeliveryScript, c.remoteDeliveryScript,
 	)
 	if err != nil {
@@ -518,7 +493,7 @@ func (c *channelCloser) proposeCloseSigned(fee btcutil.Amount) (*lnwire.ClosingS
 	// party responds we'll be able to decide if we've agreed on fees or
 	// not.
 	c.lastFeeProposal = fee
-	parsedSig, err := btcec.ParseSignature(rawSig, btcec.S256())
+	parsedSig, err := lnwire.NewSigFromRawSignature(rawSig)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +501,7 @@ func (c *channelCloser) proposeCloseSigned(fee btcutil.Amount) (*lnwire.ClosingS
 	peerLog.Infof("ChannelPoint(%v): proposing fee of %v sat to close "+
 		"chan", c.chanPoint, int64(fee))
 
-	// We'll assembled a ClosingSigned message using this information and
+	// We'll assemble a ClosingSigned message using this information and
 	// return it to the caller so we can kick off the final stage of the
 	// channel closure project.
 	closeSignedMsg := lnwire.NewClosingSigned(c.cid, fee, parsedSig)
@@ -544,7 +519,7 @@ func (c *channelCloser) proposeCloseSigned(fee btcutil.Amount) (*lnwire.ClosingS
 // consider their fee acceptable if it's within 30% of our fee.
 func feeInAcceptableRange(localFee, remoteFee btcutil.Amount) bool {
 	// If our offer is lower than theirs, then we'll accept their
-	// offer it it's no more than 30% *greater* than our current
+	// offer if it's no more than 30% *greater* than our current
 	// offer.
 	if localFee < remoteFee {
 		acceptableRange := localFee + ((localFee * 3) / 10)
@@ -559,7 +534,7 @@ func feeInAcceptableRange(localFee, remoteFee btcutil.Amount) bool {
 
 // rachetFee is our step function used to inch our fee closer to something that
 // both sides can agree on. If up is true, then we'll attempt to increase our
-// offered fee. Otherwise, if up if false, then we'll attempt to decrease our
+// offered fee. Otherwise, if up is false, then we'll attempt to decrease our
 // offered fee.
 func rachetFee(fee btcutil.Amount, up bool) btcutil.Amount {
 	// If we need to rachet up, then we'll increase our fee by 10%.

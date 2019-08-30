@@ -4,7 +4,7 @@
 set -e
 
 # error function is used within a bash function in order to send the error
-# mesage directly to the stderr output and exit.
+# message directly to the stderr output and exit.
 error() {
     echo "$1" > /dev/stderr
     exit 0
@@ -46,16 +46,22 @@ NETWORK=$(set_default "$NETWORK" "simnet")
 CHAIN=$(set_default "$CHAIN" "bitcoin")
 LND_RPC_CERT=$(set_default "$RPC_CERT" "$HOME/.lnd/tls.cert")
 
-lnd \
-    --noencryptwallet \
+BACKEND="btcd"
+if [[ "$CHAIN" == "litecoin" ]]; then
+    BACKEND="ltcd"
+fi
+
+exec lnd \
     --no-macaroons \
+    --noseedbackup \
     --logdir="/data" \
-    "--$CHAIN.rpccert"="/rpc/rpc.cert" \
     "--$CHAIN.active" \
     "--$CHAIN.$NETWORK" \
-    "--$CHAIN.rpchost"="blockchain" \
-    "--$CHAIN.rpcuser"="$RPCUSER" \
-    "--$CHAIN.rpcpass"="$RPCPASS" \
+    "--$CHAIN.node"="btcd" \
+    "--$BACKEND.rpccert"="/rpc/rpc.cert" \
+    "--$BACKEND.rpchost"="blockchain" \
+    "--$BACKEND.rpcuser"="$RPCUSER" \
+    "--$BACKEND.rpcpass"="$RPCPASS" \
     "--rpcport=10009" \
     --debuglevel="$DEBUG" \
     "$@" &

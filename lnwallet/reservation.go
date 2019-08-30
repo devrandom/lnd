@@ -1,16 +1,16 @@
 package lnwallet
 
 import (
-	"fmt"
 	"net"
 	"sync"
 
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnwire"
-	"github.com/roasbeef/btcd/btcec"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
 )
 
 // ChannelContribution is the primary constituent of the funding workflow
@@ -50,17 +50,9 @@ func (c *ChannelContribution) toChanConfig() channeldb.ChannelConfig {
 	return *c.ChannelConfig
 }
 
-// InputScript represents any script inputs required to redeem a previous
-// output. This struct is used rather than just a witness, or scripSig in
-// order to accommodate nested p2sh which utilizes both types of input scripts.
-type InputScript struct {
-	Witness   [][]byte
-	ScriptSig []byte
-}
-
 // ChannelReservation represents an intent to open a lightning payment channel
-// a counterparty. The funding processes from reservation to channel opening is
-// a 3-step process. In order to allow for full concurrency during the
+// with a counterparty. The funding processes from reservation to channel opening
+// is a 3-step process. In order to allow for full concurrency during the
 // reservation workflow, resources consumed by a contribution are "locked"
 // themselves. This prevents a number of race conditions such as two funding
 // transactions double-spending the same input. A reservation can also be
@@ -70,12 +62,12 @@ type InputScript struct {
 // The reservation workflow consists of the following three steps:
 //  1. lnwallet.InitChannelReservation
 //     * One requests the wallet to allocate the necessary resources for a
-//      channel reservation. These resources a put in limbo for the lifetime
-//      of a reservation.
-//    * Once completed the reservation will have the wallet's contribution
-//      accessible via the .OurContribution() method. This contribution
-//      contains the necessary items to allow the remote party to build both
-//      the funding, and commitment transactions.
+//       channel reservation. These resources are put in limbo for the lifetime
+//       of a reservation.
+//     * Once completed the reservation will have the wallet's contribution
+//       accessible via the .OurContribution() method. This contribution
+//       contains the necessary items to allow the remote party to build both
+//       the funding, and commitment transactions.
 //  2. ChannelReservation.ProcessContribution/ChannelReservation.ProcessSingleContribution
 //     * The counterparty presents their contribution to the payment channel.
 //       This allows us to build the funding, and commitment transactions
@@ -99,8 +91,8 @@ type ChannelReservation struct {
 
 	// In order of sorted inputs. Sorting is done in accordance
 	// to BIP-69: https://github.com/bitcoin/bips/blob/master/bip-0069.mediawiki.
-	ourFundingInputScripts   []*InputScript
-	theirFundingInputScripts []*InputScript
+	ourFundingInputScripts   []*input.Script
+	theirFundingInputScripts []*input.Script
 
 	// Our signature for their version of the commitment transaction.
 	ourCommitmentSig   []byte
@@ -110,7 +102,7 @@ type ChannelReservation struct {
 	theirContribution *ChannelContribution
 
 	partialState *channeldb.OpenChannel
-	nodeAddr     *net.TCPAddr
+	nodeAddr     net.Addr
 
 	// The ID of this reservation, used to uniquely track the reservation
 	// throughout its lifetime.
@@ -135,9 +127,9 @@ type ChannelReservation struct {
 // used only internally by lnwallet. In order to concurrent safety, the
 // creation of all channel reservations should be carried out via the
 // lnwallet.InitChannelReservation interface.
-func NewChannelReservation(capacity, fundingAmt, commitFeePerKw btcutil.Amount,
-	wallet *LightningWallet, id uint64, pushMSat lnwire.MilliSatoshi,
-	chainHash *chainhash.Hash,
+func NewChannelReservation(capacity, localFundingAmt btcutil.Amount,
+	commitFeePerKw SatPerKWeight, wallet *LightningWallet,
+	id uint64, pushMSat lnwire.MilliSatoshi, chainHash *chainhash.Hash,
 	flags lnwire.FundingFlag) (*ChannelReservation, error) {
 
 	var (
@@ -146,26 +138,34 @@ func NewChannelReservation(capacity, fundingAmt, commitFeePerKw btcutil.Amount,
 		initiator    bool
 	)
 
-	commitFee := btcutil.Amount(
-		(int64(commitFeePerKw) * CommitWeight) / 1000,
-	)
-
-	fundingMSat := lnwire.NewMSatFromSatoshis(fundingAmt)
+	commitFee := commitFeePerKw.FeeForWeight(input.CommitWeight)
+	localFundingMSat := lnwire.NewMSatFromSatoshis(localFundingAmt)
+	// TODO(halseth): make method take remote funding amount direcly
+	// instead of inferring it from capacity and local amt.
 	capacityMSat := lnwire.NewMSatFromSatoshis(capacity)
 	feeMSat := lnwire.NewMSatFromSatoshis(commitFee)
 
 	// If we're the responder to a single-funder reservation, then we have
 	// no initial balance in the channel unless the remote party is pushing
 	// some funds to us within the first commitment state.
-	if fundingAmt == 0 {
+	if localFundingAmt == 0 {
 		ourBalance = pushMSat
 		theirBalance = capacityMSat - feeMSat - pushMSat
 		initiator = false
+
+		// If the responder doesn't have enough funds to actually pay
+		// the fees, then we'll bail our early.
+		if int64(theirBalance) < 0 {
+			return nil, ErrFunderBalanceDust(
+				int64(commitFee), int64(theirBalance.ToSatoshis()),
+				int64(2*DefaultDustLimit()),
+			)
+		}
 	} else {
 		// TODO(roasbeef): need to rework fee structure in general and
 		// also when we "unlock" dual funder within the daemon
 
-		if capacity == fundingAmt {
+		if capacity == localFundingAmt {
 			// If we're initiating a single funder workflow, then
 			// we pay all the initial fees within the commitment
 			// transaction. We also deduct our balance by the
@@ -176,22 +176,33 @@ func NewChannelReservation(capacity, fundingAmt, commitFeePerKw btcutil.Amount,
 			// Otherwise, this is a dual funder workflow where both
 			// slides split the amount funded and the commitment
 			// fee.
-			ourBalance = fundingMSat - (feeMSat / 2)
-			theirBalance = capacityMSat - fundingMSat - (feeMSat / 2) + pushMSat
+			ourBalance = localFundingMSat - (feeMSat / 2)
+			theirBalance = capacityMSat - localFundingMSat - (feeMSat / 2) + pushMSat
 		}
 
 		initiator = true
+
+		// If we, the initiator don't have enough funds to actually pay
+		// the fees, then we'll exit with an error.
+		if int64(ourBalance) < 0 {
+			return nil, ErrFunderBalanceDust(
+				int64(commitFee), int64(ourBalance),
+				int64(2*DefaultDustLimit()),
+			)
+		}
 	}
 
 	// If we're the initiator and our starting balance within the channel
-	// after we take account of fees is below dust, then we'll reject this
-	// channel creation request.
+	// after we take account of fees is below 2x the dust limit, then we'll
+	// reject this channel creation request.
 	//
 	// TODO(roasbeef): reject if 30% goes to fees? dust channel
-	if initiator && ourBalance.ToSatoshis() <= DefaultDustLimit() {
-		return nil, fmt.Errorf("unable to init reservation, with "+
-			"fee=%v sat/kw, local output is too small: %v sat",
-			int64(commitFee), int64(ourBalance.ToSatoshis()))
+	if initiator && ourBalance.ToSatoshis() <= 2*DefaultDustLimit() {
+		return nil, ErrFunderBalanceDust(
+			int64(commitFee),
+			int64(ourBalance.ToSatoshis()),
+			int64(2*DefaultDustLimit()),
+		)
 	}
 
 	// Next we'll set the channel type based on what we can ascertain about
@@ -229,13 +240,13 @@ func NewChannelReservation(capacity, fundingAmt, commitFeePerKw btcutil.Amount,
 			LocalCommitment: channeldb.ChannelCommitment{
 				LocalBalance:  ourBalance,
 				RemoteBalance: theirBalance,
-				FeePerKw:      commitFeePerKw,
+				FeePerKw:      btcutil.Amount(commitFeePerKw),
 				CommitFee:     commitFee,
 			},
 			RemoteCommitment: channeldb.ChannelCommitment{
 				LocalBalance:  ourBalance,
 				RemoteBalance: theirBalance,
-				FeePerKw:      commitFeePerKw,
+				FeePerKw:      btcutil.Amount(commitFeePerKw),
 				CommitFee:     commitFee,
 			},
 			Db: wallet.Cfg.Database,
@@ -260,59 +271,80 @@ func (r *ChannelReservation) SetNumConfsRequired(numConfs uint16) {
 	r.partialState.NumConfsRequired = numConfs
 }
 
-// RegisterMinHTLC registers our desired amount for the smallest acceptable
-// HTLC we'll accept within this channel. Any HTLC's that are extended which
-// are below this value will SHOULD be rejected.
-func (r *ChannelReservation) RegisterMinHTLC(minHTLC lnwire.MilliSatoshi) {
-	r.Lock()
-	defer r.Unlock()
-
-	r.ourContribution.MinHTLC = minHTLC
-}
-
 // CommitConstraints takes the constraints that the remote party specifies for
 // the type of commitments that we can generate for them. These constraints
 // include several parameters that serve as flow control restricting the amount
 // of satoshis that can be transferred in a single commitment. This function
 // will also attempt to verify the constraints for sanity, returning an error
 // if the parameters are seemed unsound.
-func (r *ChannelReservation) CommitConstraints(csvDelay, maxHtlcs uint16,
-	maxValueInFlight lnwire.MilliSatoshi, chanReserve btcutil.Amount) error {
-
+func (r *ChannelReservation) CommitConstraints(c *channeldb.ChannelConstraints) error {
 	r.Lock()
 	defer r.Unlock()
 
-	r.ourContribution.ChannelConfig.CsvDelay = csvDelay
-	r.ourContribution.ChannelConfig.ChanReserve = chanReserve
-	r.ourContribution.ChannelConfig.MaxAcceptedHtlcs = maxHtlcs
-	r.ourContribution.ChannelConfig.MaxPendingAmount = maxValueInFlight
+	// Fail if we consider csvDelay excessively large.
+	// TODO(halseth): find a more scientific choice of value.
+	const maxDelay = 10000
+	if c.CsvDelay > maxDelay {
+		return ErrCsvDelayTooLarge(c.CsvDelay, maxDelay)
+	}
+
+	// The dust limit should always be greater or equal to the channel
+	// reserve. The reservation request should be denied if otherwise.
+	if c.DustLimit > c.ChanReserve {
+		return ErrChanReserveTooSmall(c.ChanReserve, c.DustLimit)
+	}
+
+	// Fail if we consider the channel reserve to be too large.  We
+	// currently fail if it is greater than 20% of the channel capacity.
+	maxChanReserve := r.partialState.Capacity / 5
+	if c.ChanReserve > maxChanReserve {
+		return ErrChanReserveTooLarge(c.ChanReserve, maxChanReserve)
+	}
+
+	// Fail if the minimum HTLC value is too large. If this is too large,
+	// the channel won't be useful for sending small payments. This limit
+	// is currently set to maxValueInFlight, effectively letting the remote
+	// setting this as large as it wants.
+	if c.MinHTLC > c.MaxPendingAmount {
+		return ErrMinHtlcTooLarge(c.MinHTLC, c.MaxPendingAmount)
+	}
+
+	// Fail if maxHtlcs is above the maximum allowed number of 483.  This
+	// number is specified in BOLT-02.
+	if c.MaxAcceptedHtlcs > uint16(input.MaxHTLCNumber/2) {
+		return ErrMaxHtlcNumTooLarge(
+			c.MaxAcceptedHtlcs, uint16(input.MaxHTLCNumber/2),
+		)
+	}
+
+	// Fail if we consider maxHtlcs too small. If this is too small we
+	// cannot offer many HTLCs to the remote.
+	const minNumHtlc = 5
+	if c.MaxAcceptedHtlcs < minNumHtlc {
+		return ErrMaxHtlcNumTooSmall(c.MaxAcceptedHtlcs, minNumHtlc)
+	}
+
+	// Fail if we consider maxValueInFlight too small. We currently require
+	// the remote to at least allow minNumHtlc * minHtlc in flight.
+	if c.MaxPendingAmount < minNumHtlc*c.MinHTLC {
+		return ErrMaxValueInFlightTooSmall(
+			c.MaxPendingAmount, minNumHtlc*c.MinHTLC,
+		)
+	}
+
+	// Our dust limit should always be less than or equal to our proposed
+	// channel reserve.
+	if r.ourContribution.DustLimit > c.ChanReserve {
+		r.ourContribution.DustLimit = c.ChanReserve
+	}
+
+	r.ourContribution.ChanReserve = c.ChanReserve
+	r.ourContribution.MaxPendingAmount = c.MaxPendingAmount
+	r.ourContribution.MinHTLC = c.MinHTLC
+	r.ourContribution.MaxAcceptedHtlcs = c.MaxAcceptedHtlcs
+	r.ourContribution.CsvDelay = c.CsvDelay
 
 	return nil
-}
-
-// RemoteChanConstraints returns our desired parameters which constraint the
-// type of commitment transactions that the remote party can extend for our
-// current state. In order to ensure that we only accept sane states, we'll
-// specify: the required reserve the remote party must uphold, the max value in
-// flight, and the maximum number of HTLC's that can propose in a state.
-func (r *ChannelReservation) RemoteChanConstraints() (btcutil.Amount, lnwire.MilliSatoshi, uint16) {
-	chanCapacity := r.partialState.Capacity
-
-	// TODO(roasbeef): move csv delay calculation into func?
-
-	// By default, we'll require them to maintain at least 1% of the total
-	// channel capacity at all times. This is the absolute amount the
-	// settled balance of the remote party must be above at *all* times.
-	chanReserve := (chanCapacity) / 100
-
-	// We'll allow them to fully utilize the full bandwidth of the channel,
-	// minus our required reserve.
-	maxValue := lnwire.NewMSatFromSatoshis(chanCapacity - chanReserve)
-
-	// Finally, we'll permit them to utilize the full channel bandwidth
-	maxHTLCs := uint16(MaxHTLCNumber / 2)
-
-	return chanReserve, maxValue, maxHTLCs
 }
 
 // OurContribution returns the wallet's fully populated contribution to the
@@ -366,7 +398,7 @@ func (r *ChannelReservation) ProcessSingleContribution(theirContribution *Channe
 // TheirContribution returns the counterparty's pending contribution to the
 // payment channel. See 'ChannelContribution' for further details regarding the
 // contents of a contribution. This attribute will ONLY be available after a
-// call to .ProcesContribution().
+// call to .ProcessContribution().
 //
 // NOTE: This SHOULD NOT be modified.
 func (r *ChannelReservation) TheirContribution() *ChannelContribution {
@@ -382,8 +414,8 @@ func (r *ChannelReservation) TheirContribution() *ChannelContribution {
 // BIP-69: https://github.com/bitcoin/bips/blob/master/bip-0069.mediawiki.
 //
 // NOTE: These signatures will only be populated after a call to
-// .ProcesContribution()
-func (r *ChannelReservation) OurSignatures() ([]*InputScript, []byte) {
+// .ProcessContribution()
+func (r *ChannelReservation) OurSignatures() ([]*input.Script, []byte) {
 	r.RLock()
 	defer r.RUnlock()
 	return r.ourFundingInputScripts, r.ourCommitmentSig
@@ -397,12 +429,12 @@ func (r *ChannelReservation) OurSignatures() ([]*InputScript, []byte) {
 // https://github.com/bitcoin/bips/blob/master/bip-0069.mediawiki.
 // Additionally, verification is performed in order to ensure that the
 // counterparty supplied a valid signature to our version of the commitment
-// transaction.  Once this method returns, caller's should then call
-// .WaitForChannelOpen() which will block until the funding transaction obtains
-// the configured number of confirmations. Once the method unblocks, a
-// LightningChannel instance is returned, marking the channel available for
-// updates.
-func (r *ChannelReservation) CompleteReservation(fundingInputScripts []*InputScript,
+// transaction.  Once this method returns, callers should broadcast the
+// created funding transaction, then call .WaitForChannelOpen() which will
+// block until the funding transaction obtains the configured number of
+// confirmations. Once the method unblocks, a LightningChannel instance is
+// returned, marking the channel available for updates.
+func (r *ChannelReservation) CompleteReservation(fundingInputScripts []*input.Script,
 	commitmentSig []byte) (*channeldb.OpenChannel, error) {
 
 	// TODO(roasbeef): add flag for watch or not?
@@ -453,7 +485,7 @@ func (r *ChannelReservation) CompleteReservationSingle(fundingPoint *wire.OutPoi
 //
 // NOTE: These attributes will be unpopulated before a call to
 // .CompleteReservation().
-func (r *ChannelReservation) TheirSignatures() ([]*InputScript, []byte) {
+func (r *ChannelReservation) TheirSignatures() ([]*input.Script, []byte) {
 	r.RLock()
 	defer r.RUnlock()
 	return r.theirFundingInputScripts, r.theirCommitmentSig
@@ -481,6 +513,13 @@ func (r *ChannelReservation) FundingOutpoint() *wire.OutPoint {
 	r.RLock()
 	defer r.RUnlock()
 	return &r.partialState.FundingOutpoint
+}
+
+// Capacity returns the channel capacity for this reservation.
+func (r *ChannelReservation) Capacity() btcutil.Amount {
+	r.RLock()
+	defer r.RUnlock()
+	return r.partialState.Capacity
 }
 
 // Cancel abandons this channel reservation. This method should be called in
