@@ -1015,18 +1015,18 @@ func loadConfig() (*config, error) {
 	// For each of the RPC listeners (REST+gRPC), we'll ensure that users
 	// have specified a safe combo for authentication. If not, we'll bail
 	// out with an error.
-	err = lncfg.EnforceSafeAuthentication(
-		cfg.RPCListeners, !cfg.NoMacaroons,
-	)
-	if err != nil {
-		return nil, err
-	}
-	err = lncfg.EnforceSafeAuthentication(
-		cfg.RESTListeners, !cfg.NoMacaroons,
-	)
-	if err != nil {
-		return nil, err
-	}
+	// err = lncfg.EnforceSafeAuthentication(
+	// 	cfg.RPCListeners, !cfg.NoMacaroons,
+	// )
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// err = lncfg.EnforceSafeAuthentication(
+	// 	cfg.RESTListeners, !cfg.NoMacaroons,
+	// )
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// Remove the listening addresses specified if listening is disabled.
 	if cfg.DisableListen {
